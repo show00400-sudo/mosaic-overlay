@@ -21,4 +21,4 @@ python main.py
 3. GitHub Actions가 exe를 빌드해 Releases에 `MosaicOverlay.exe` 업로드
 4. 사용자가 프로그램을 켜면 새 버전을 감지해 **UPDATE** 버튼이 표시되고, 클릭하면 자동 교체 후 재시작
 
-> 최초 1회: `version.py` 의 `GITHUB_REPO` 를 본인 저장소로 변경.
+> 최초 1회: `version.py` 의 `GITHUB_REPO` 는 `show00400-sudo/mosaic-overlay` 로 설정됨.
