@@ -31,14 +31,14 @@ jobs:
           [ "v$V" = "${GITHUB_REF_NAME}" ] || { echo "tag(${GITHUB_REF_NAME}) != version.py(v$V)"; exit 1; }
 
       - name: Build exe (onedir - onefile 보다 백신 오탐이 적음)
-        run: pyinstaller --onedir --noconsole --name MosaicOverlay --add-data "face_detection_yunet_2023mar.onnx;." main.py
+        run: pyinstaller --onedir --noconsole --name CapybaraEye --icon assets/icon.ico --add-data "face_detection_yunet_2023mar.onnx;." --add-data "assets/icon.ico;assets" main.py
 
       - name: Zip
         shell: pwsh
-        run: Compress-Archive -Path dist/MosaicOverlay -DestinationPath MosaicOverlay.zip
+        run: Compress-Archive -Path dist/CapybaraEye -DestinationPath CapybaraEye.zip
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: MosaicOverlay.zip
+          files: CapybaraEye.zip
           generate_release_notes: true

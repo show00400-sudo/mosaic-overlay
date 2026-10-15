@@ -24,12 +24,14 @@ def resource_path(relative_path):
 
 
 from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QLabel
-from PyQt5.QtGui import QPainter, QImage, QColor, QPen, QDesktopServices
+from PyQt5.QtGui import QPainter, QImage, QColor, QPen, QDesktopServices, QIcon
 from PyQt5.QtCore import Qt, QTimer, QRect, QPoint, QUrl, pyqtSignal
 
 
 MODEL_PATH = resource_path("face_detection_yunet_2023mar.onnx")
 SAVE_DIR = "training_data"
+APP_NAME = "매의 눈 카피바라"
+ICON_PATH = resource_path(os.path.join("assets", "icon.ico"))
 
 
 class YuNetMosaicOverlay(QWidget):
@@ -82,6 +84,9 @@ class YuNetMosaicOverlay(QWidget):
 
         self.latest_frame = None
         self.update_url = None
+
+        self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(QIcon(ICON_PATH))
 
         self.setWindowFlags(
             Qt.FramelessWindowHint |
@@ -544,6 +549,8 @@ if __name__ == "__main__":
     applog.setup()
     try:
         app = QApplication(sys.argv)
+        app.setApplicationName(APP_NAME)
+        app.setWindowIcon(QIcon(ICON_PATH))
 
         overlay = YuNetMosaicOverlay()
         overlay.showFullScreen()

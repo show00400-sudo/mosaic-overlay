@@ -38,7 +38,7 @@ def setup():
     except Exception:
         logging.exception("faulthandler 활성화 실패")
 
-    logging.info("Mosaic Overlay v%s", __version__)
+    logging.info("매의 눈 카피바라 v%s", __version__)
     logging.info("OS: %s | Python %s | frozen=%s", platform.platform(), sys.version.split()[0], getattr(sys, "frozen", False))
     logging.info("exe/dir: %s", app_dir())
     return path
