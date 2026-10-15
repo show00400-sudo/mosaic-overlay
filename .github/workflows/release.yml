@@ -1,0 +1,40 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements-dev.txt
+
+      - name: Download YuNet model
+        run: curl -L -o face_detection_yunet_2023mar.onnx https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
+
+      - name: Check tag matches version.py
+        shell: bash
+        run: |
+          V=$(python -c "from version import __version__; print(__version__)")
+          [ "v$V" = "${GITHUB_REF_NAME}" ] || { echo "tag(${GITHUB_REF_NAME}) != version.py(v$V)"; exit 1; }
+
+      - name: Build exe
+        run: pyinstaller --onefile --noconsole --name MosaicOverlay --add-data "face_detection_yunet_2023mar.onnx;." main.py
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/MosaicOverlay.exe
+          generate_release_notes: true
