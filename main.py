@@ -5,11 +5,13 @@ import csv
 import time
 import ctypes
 import threading
+import logging
 import numpy as np
 import mss
 
 from version import __version__
 import updater
+import applog
 
 
 def resource_path(relative_path):
@@ -22,8 +24,8 @@ def resource_path(relative_path):
 
 
 from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QLabel
-from PyQt5.QtGui import QPainter, QImage, QColor, QPen
-from PyQt5.QtCore import Qt, QTimer, QRect, QPoint, pyqtSignal
+from PyQt5.QtGui import QPainter, QImage, QColor, QPen, QDesktopServices
+from PyQt5.QtCore import Qt, QTimer, QRect, QPoint, QUrl, pyqtSignal
 
 
 MODEL_PATH = resource_path("face_detection_yunet_2023mar.onnx")
@@ -37,6 +39,7 @@ class YuNetMosaicOverlay(QWidget):
         super().__init__()
 
         if not os.path.exists(MODEL_PATH):
+            logging.critical("모델 파일 없음: %s", MODEL_PATH)
             print(f"[ERROR] 모델 파일 없음: {MODEL_PATH}")
             print("face_detection_yunet_2023mar.onnx 파일을 코드와 같은 폴더에 넣어주세요.")
             sys.exit(1)
@@ -45,6 +48,11 @@ class YuNetMosaicOverlay(QWidget):
 
         self.sct = mss.MSS()
         self.monitor = self.sct.monitors[1]
+        logging.info("모니터: %s", self.monitor)
+
+        self.black_frames = 0
+        self.dxcam = None
+        self.capture_backend = "mss"
 
         self.screen_w = self.monitor["width"]
         self.screen_h = self.monitor["height"]
@@ -163,22 +171,13 @@ class YuNetMosaicOverlay(QWidget):
 
     def on_update_found(self, tag, url):
         self.update_url = url
-        self.btn_update.setText(f"UPDATE {tag}")
+        self.btn_update.setText(f"NEW {tag}")
         self.btn_update.show()
-        self.label.setText(f"새 버전 {tag} 있음 (현재 v{__version__})")
+        self.label.setText(f"새 버전 {tag} 있음 (현재 v{__version__}) - 버튼을 누르면 다운로드 페이지가 열립니다")
 
     def do_update(self):
-        if not self.update_url:
-            return
-        self.label.setText("업데이트 다운로드 중...")
-        QApplication.processEvents()
-        try:
-            if updater.apply_update(self.update_url):
-                self.close()
-            else:
-                self.label.setText("exe 실행본에서만 자동 업데이트됩니다 (소스는 git pull)")
-        except Exception as e:
-            self.label.setText(f"업데이트 실패: {e}")
+        if self.update_url:
+            QDesktopServices.openUrl(QUrl(self.update_url))
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -186,12 +185,15 @@ class YuNetMosaicOverlay(QWidget):
         try:
             hwnd = int(self.winId())
             WDA_EXCLUDEFROMCAPTURE = 0x00000011
-            ctypes.windll.user32.SetWindowDisplayAffinity(
+            ok = ctypes.windll.user32.SetWindowDisplayAffinity(
                 hwnd,
                 WDA_EXCLUDEFROMCAPTURE
             )
+            logging.info("SetWindowDisplayAffinity 결과: %s", ok)
+            if not ok:
+                logging.warning("캡처 제외 설정 실패 - 모자이크가 캡처에 다시 잡혀 깜빡일 수 있음")
         except Exception:
-            pass
+            logging.exception("SetWindowDisplayAffinity 예외")
 
     def toggle_mosaic(self):
         self.mosaic_on = not self.mosaic_on
@@ -365,12 +367,55 @@ class YuNetMosaicOverlay(QWidget):
 
         return updated_faces
 
+    def grab_frame(self):
+        try:
+            if self.dxcam is not None:
+                frame = self.dxcam.grab()
+                if frame is None:
+                    return None
+            else:
+                screenshot = np.array(self.sct.grab(self.monitor))
+                frame = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
+        except Exception:
+            logging.exception("화면 캡처 실패 (backend=%s)", self.capture_backend)
+            self.capture_failed()
+            return None
+
+        # 보안 프로그램이 캡처를 막으면 전체가 검은 화면으로 들어온다
+        if frame.max() == 0:
+            self.black_frames += 1
+            if self.black_frames == 40:
+                logging.warning("캡처 프레임이 계속 검은색 (backend=%s) - 보안 프로그램의 캡처 차단 의심", self.capture_backend)
+                self.capture_failed()
+        else:
+            self.black_frames = 0
+        return frame
+
+    def capture_failed(self):
+        """mss 가 막히면 dxcam(Desktop Duplication) 으로 한 번 전환 시도."""
+        self.black_frames = 0
+        if self.dxcam is not None or getattr(self, "dxcam_tried", False):
+            self.label.setText("화면 캡처가 차단된 것 같습니다. mosaic_log.txt 를 확인하세요")
+            return
+        self.dxcam_tried = True
+        try:
+            import dxcam
+            self.dxcam = dxcam.create(output_color="BGR")
+            self.dxcam.start(target_fps=40)
+            self.capture_backend = "dxcam"
+            logging.info("캡처 방식을 dxcam 으로 전환")
+        except Exception:
+            self.dxcam = None
+            logging.exception("dxcam 전환 실패")
+            self.label.setText("화면 캡처가 차단된 것 같습니다. mosaic_log.txt 를 확인하세요")
+
     def update_frame(self):
         if not self.mosaic_on:
             return
 
-        screenshot = np.array(self.sct.grab(self.monitor))
-        frame = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
+        frame = self.grab_frame()
+        if frame is None:
+            return
 
         self.latest_frame = frame.copy()
         self.frame_count += 1
@@ -496,9 +541,19 @@ class YuNetMosaicOverlay(QWidget):
 
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
+    applog.setup()
+    try:
+        app = QApplication(sys.argv)
 
-    overlay = YuNetMosaicOverlay()
-    overlay.showFullScreen()
+        overlay = YuNetMosaicOverlay()
+        overlay.showFullScreen()
+        logging.info("오버레이 표시 완료")
 
-    sys.exit(app.exec_())
+        code = app.exec_()
+        logging.info("정상 종료 (code=%s)", code)
+        sys.exit(code)
+    except SystemExit:
+        raise
+    except Exception:
+        logging.exception("시작 중 예외")
+        raise

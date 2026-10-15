@@ -2,3 +2,4 @@ PyQt5
 opencv-contrib-python
 numpy
 mss
+dxcam; sys_platform == "win32"
