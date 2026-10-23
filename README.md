@@ -27,3 +27,13 @@ python main.py
 - 실행 폴더에 생기는 `mosaic_log.txt`, `mosaic_crash.txt` 를 개발자에게 전달
 - 백신이 차단하면 폴더를 예외 등록하거나 오탐 신고
 - 화면 캡처가 검게 나오면 자동으로 dxcam 방식으로 전환을 시도하며 로그에 기록됨
+
+## 속도 설정
+상단 **SPEED** 버튼으로 전환 (FAST → NORMAL → ACCURATE)
+| 설정 | 검출 화면 너비 | 추적기 | 특징 |
+|---|---|---|---|
+| FAST | 640px | KCF | 가장 빠름, 작은 얼굴을 놓칠 수 있음 |
+| NORMAL (기본) | 960px | CSRT | 균형 |
+| ACCURATE | 1440px | CSRT | 정확하지만 느림 |
+
+`mosaic_log.txt` 에 120프레임마다 평균 처리 시간(ms)이 기록됩니다.

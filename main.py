@@ -24,7 +24,7 @@ def resource_path(relative_path):
 
 
 from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QLabel
-from PyQt5.QtGui import QPainter, QImage, QColor, QPen, QDesktopServices, QIcon
+from PyQt5.QtGui import QPainter, QImage, QColor, QPen, QDesktopServices, QIcon, QRegion
 from PyQt5.QtCore import Qt, QTimer, QRect, QPoint, QUrl, pyqtSignal
 
 
@@ -32,6 +32,16 @@ MODEL_PATH = resource_path("face_detection_yunet_2023mar.onnx")
 SAVE_DIR = "training_data"
 APP_NAME = "매의 눈 카피바라"
 ICON_PATH = resource_path(os.path.join("assets", "icon.ico"))
+
+# 성능 설정: (검출/추적 화면 너비, 추적기, 재검출 간격 프레임)
+# 너비가 작을수록 빠르지만 작은 얼굴을 놓칠 수 있음. KCF 는 CSRT 보다 약 2배 빠르고 덜 정확함
+QUALITY_PRESETS = {
+    "FAST": (640, "KCF", 3),
+    "NORMAL": (960, "CSRT", 2),
+    "ACCURATE": (1440, "CSRT", 2),
+}
+DEFAULT_QUALITY = "NORMAL"
+MOSAIC_SCALE = 0.045  # 모자이크 해상도 비율 (얼굴 크기 대비)
 
 
 class YuNetMosaicOverlay(QWidget):
@@ -53,6 +63,11 @@ class YuNetMosaicOverlay(QWidget):
         logging.info("모니터: %s", self.monitor)
 
         self.black_frames = 0
+        self.quality = DEFAULT_QUALITY
+        self.apply_quality()
+        self.det_size = None
+        self.perf_ms = 0.0
+        self.perf_n = 0
         self.dxcam = None
         self.capture_backend = "mss"
 
@@ -96,7 +111,6 @@ class YuNetMosaicOverlay(QWidget):
 
         self.trackers = []
         self.tracker_rects = []
-        self.detect_every = 2
         self.frame_count = 2.0
 
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -124,8 +138,12 @@ class YuNetMosaicOverlay(QWidget):
         self.btn_exit.setGeometry(320, 20, 100, 45)
         self.btn_exit.clicked.connect(self.close)
 
+        self.btn_quality = QPushButton(f"SPEED: {self.quality}", self)
+        self.btn_quality.setGeometry(430, 20, 170, 45)
+        self.btn_quality.clicked.connect(self.toggle_quality)
+
         self.btn_update = QPushButton("UPDATE", self)
-        self.btn_update.setGeometry(980, 20, 160, 45)
+        self.btn_update.setGeometry(1100, 20, 170, 45)
         self.btn_update.clicked.connect(self.do_update)
         self.btn_update.hide()
 
@@ -144,10 +162,11 @@ class YuNetMosaicOverlay(QWidget):
         self.btn_mosaic.setStyleSheet(btn_style)
         self.btn_train.setStyleSheet(btn_style)
         self.btn_exit.setStyleSheet(btn_style)
+        self.btn_quality.setStyleSheet(btn_style)
         self.btn_update.setStyleSheet(btn_style.replace("30, 30, 30", "20, 120, 60"))
 
         self.label = QLabel("TRAIN OFF | 놓친 얼굴은 TRAIN ON 후 드래그 저장", self)
-        self.label.setGeometry(440, 25, 520, 35)
+        self.label.setGeometry(610, 25, 480, 35)
         self.label.setStyleSheet("""
             QLabel {
                 background-color: rgba(30, 30, 30, 180);
@@ -214,9 +233,14 @@ class YuNetMosaicOverlay(QWidget):
 
         self.update()
 
+    def apply_quality(self):
+        self.detect_width, self.tracker_type, self.detect_every = QUALITY_PRESETS[self.quality]
+
     def create_tracker(self):
-        if hasattr(cv2, "legacy"):
-            return cv2.legacy.TrackerCSRT_create()
+        name = f"Tracker{self.tracker_type}_create"
+        for mod in (getattr(cv2, "legacy", None), cv2):
+            if mod is not None and hasattr(mod, name):
+                return getattr(mod, name)()
         return cv2.TrackerCSRT_create()
 
     def toggle_train_mode(self):
@@ -231,19 +255,17 @@ class YuNetMosaicOverlay(QWidget):
 
         self.update()
 
-    def make_mosaic(self, img, scale=0.045):
-        h, w = img.shape[:2]
+    def toggle_quality(self):
+        order = list(QUALITY_PRESETS)
+        self.quality = order[(order.index(self.quality) + 1) % len(order)]
+        self.apply_quality()
+        self.btn_quality.setText(f"SPEED: {self.quality}")
 
-        if h < 5 or w < 5:
-            return img
-
-        small_w = max(1, int(w * scale))
-        small_h = max(1, int(h * scale))
-
-        small = cv2.resize(img, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
-        mosaic = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
-
-        return mosaic
+        # 검출 해상도가 바뀌므로 추적 상태 초기화
+        self.trackers = []
+        self.last_faces.clear()
+        self.last_seen_time.clear()
+        logging.info("속도 설정 변경: %s (검출폭 %d, 추적기 %s, 재검출 %d프레임)", self.quality, self.detect_width, self.tracker_type, self.detect_every)
 
     def mousePressEvent(self, event):
         if not self.train_mode:
@@ -300,7 +322,9 @@ class YuNetMosaicOverlay(QWidget):
         img_path = os.path.join(SAVE_DIR, img_name)
         csv_path = os.path.join(SAVE_DIR, csv_name)
 
-        frame = self.latest_frame.copy()
+        frame = self.latest_frame
+        if frame.shape[2] == 4:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
         cv2.imwrite(img_path, frame)
 
         x = rect.x()
@@ -379,15 +403,14 @@ class YuNetMosaicOverlay(QWidget):
                 if frame is None:
                     return None
             else:
-                screenshot = np.array(self.sct.grab(self.monitor))
-                frame = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
+                frame = np.asarray(self.sct.grab(self.monitor))  # BGRA, 복사 없음
         except Exception:
             logging.exception("화면 캡처 실패 (backend=%s)", self.capture_backend)
             self.capture_failed()
             return None
 
         # 보안 프로그램이 캡처를 막으면 전체가 검은 화면으로 들어온다
-        if frame.max() == 0:
+        if frame[::32, ::32].max() == 0:
             self.black_frames += 1
             if self.black_frames == 40:
                 logging.warning("캡처 프레임이 계속 검은색 (backend=%s) - 보안 프로그램의 캡처 차단 의심", self.capture_backend)
@@ -418,69 +441,95 @@ class YuNetMosaicOverlay(QWidget):
         if not self.mosaic_on:
             return
 
+        t0 = time.perf_counter()
+
         frame = self.grab_frame()
         if frame is None:
             return
 
-        self.latest_frame = frame.copy()
+        self.latest_frame = frame  # 복사하지 않음 (저장할 때만 변환)
         self.frame_count += 1
+
+        fh, fw = frame.shape[:2]
+
+        # 검출/추적용 축소 화면 (전체 해상도 대비 연산량 대폭 감소)
+        scale = min(1.0, self.detect_width / fw)
+        if scale < 1.0:
+            small = cv2.resize(
+                frame,
+                (max(1, int(fw * scale)), max(1, int(fh * scale))),
+                interpolation=cv2.INTER_AREA
+            )
+        else:
+            small = frame
+
+        if small.shape[2] == 4:
+            small = cv2.cvtColor(small, cv2.COLOR_BGRA2BGR)
+
+        sh, sw = small.shape[:2]
+        ix = fw / sw  # 축소 좌표 -> 원본 좌표 배율
+        iy = fh / sh
 
         detected_rects = []
 
-        # 1) 매 프레임 tracker로 먼저 위치 추적
+        # 1) 매 프레임 tracker로 먼저 위치 추적 (축소 화면에서)
         tracker_rects = []
         alive_trackers = []
 
         for tracker in self.trackers:
-            ok, box = tracker.update(frame)
+            ok, box = tracker.update(small)
 
             if ok:
-                x, y, w, h = [int(v) for v in box]
+                x, y, w, h = box
 
-                if w > 10 and h > 10:
-                    rect = QRect(x, y, w, h)
-                    tracker_rects.append(rect)
+                if w > 6 and h > 6:
+                    tracker_rects.append(
+                        QRect(int(x * ix), int(y * iy), int(w * ix), int(h * iy))
+                    )
                     alive_trackers.append(tracker)
 
         self.trackers = alive_trackers
 
         # 2) 몇 프레임마다 YuNet으로 재검출해서 tracker 보정
         if self.frame_count % self.detect_every == 0 or len(self.trackers) == 0:
-            self.detector.setInputSize((frame.shape[1], frame.shape[0]))
-            _, faces = self.detector.detect(frame)
+            if self.det_size != (sw, sh):
+                self.detector.setInputSize((sw, sh))
+                self.det_size = (sw, sh)
+
+            _, faces = self.detector.detect(small)
 
             if faces is not None:
                 for face in faces:
-                    x, y, w, h = face[:4].astype(int)
+                    x, y, w, h = face[:4]
                     score = float(face[-1])
 
                     if score < 0.50:
                         continue
+
+                    # 원본 좌표로 환산 후 여유 영역 추가
+                    x, y, w, h = int(x * ix), int(y * iy), int(w * ix), int(h * iy)
 
                     pad_x = int(w * 0.50)
                     pad_y = int(h * 0.60)
 
                     x1 = max(x - pad_x, 0)
                     y1 = max(y - pad_y, 0)
-                    x2 = min(x + w + pad_x, frame.shape[1])
-                    y2 = min(y + h + pad_y, frame.shape[0])
+                    x2 = min(x + w + pad_x, fw)
+                    y2 = min(y + h + pad_y, fh)
 
                     detected_rects.append(QRect(x1, y1, x2 - x1, y2 - y1))
 
-            # 3) 검출된 얼굴로 tracker 새로 생성
+            # 3) 검출된 얼굴로 tracker 새로 생성 (축소 좌표)
             self.trackers = []
 
             for rect in detected_rects:
+                tx = max(int(rect.x() / ix), 0)
+                ty = max(int(rect.y() / iy), 0)
+                tw = min(max(int(rect.width() / ix), 1), sw - tx)
+                th = min(max(int(rect.height() / iy), 1), sh - ty)
+
                 tracker = self.create_tracker()
-                tracker.init(
-                    frame,
-                    (
-                        rect.x(),
-                        rect.y(),
-                        rect.width(),
-                        rect.height()
-                    )
-                )
+                tracker.init(small, (tx, ty, tw, th))
                 self.trackers.append(tracker)
 
             active_rects = detected_rects
@@ -498,33 +547,57 @@ class YuNetMosaicOverlay(QWidget):
         for rect in tracked_rects:
             x1 = max(rect.x(), 0)
             y1 = max(rect.y(), 0)
-            x2 = min(x1 + rect.width(), frame.shape[1])
-            y2 = min(y1 + rect.height(), frame.shape[0])
+            x2 = min(x1 + rect.width(), fw)
+            y2 = min(y1 + rect.height(), fh)
 
             face_img = frame[y1:y2, x1:x2]
 
             if face_img.size == 0:
                 continue
 
-            mosaic_img = self.make_mosaic(face_img)
+            # 모자이크는 처음부터 작은 해상도로만 만들고, 확대는 Qt(nearest)가 그릴 때 처리
+            bw = max(1, int((x2 - x1) * MOSAIC_SCALE))
+            bh = max(1, int((y2 - y1) * MOSAIC_SCALE))
+            tiny = cv2.resize(face_img, (bw, bh), interpolation=cv2.INTER_AREA)
 
-            rgb = cv2.cvtColor(mosaic_img, cv2.COLOR_BGR2RGB)
+            if tiny.shape[2] == 3:
+                tiny = cv2.cvtColor(tiny, cv2.COLOR_BGR2BGRA)
 
+            tiny = np.ascontiguousarray(tiny)
+
+            # BGRA 바이트 순서 == Qt RGB32(리틀엔디언), 색 변환 불필요
             qimg = QImage(
-                rgb.data,
-                rgb.shape[1],
-                rgb.shape[0],
-                rgb.strides[0],
-                QImage.Format_RGB888
+                tiny.data,
+                bw,
+                bh,
+                tiny.strides[0],
+                QImage.Format_RGB32
             ).copy()
 
             new_faces.append(QRect(x1, y1, x2 - x1, y2 - y1))
             new_images.append(qimg)
 
+        # 변경된 영역만 다시 그림 (이전 위치 + 새 위치)
+        dirty = QRegion()
+        for r in self.faces + new_faces:
+            dirty = dirty.united(r.adjusted(-4, -4, 4, 4))
+
         self.faces = new_faces
         self.mosaic_images = new_images
 
-        self.update()
+        self.update(dirty)
+
+        # 성능 로그: 120프레임 평균 처리 시간
+        self.perf_ms += (time.perf_counter() - t0) * 1000
+        self.perf_n += 1
+        if self.perf_n >= 120:
+            logging.info(
+                "평균 프레임 처리 %.1f ms | 얼굴 %d개 | 검출폭 %d(%s) | 캡처 %s | 화면 %dx%d",
+                self.perf_ms / self.perf_n, len(new_faces), sw, self.quality,
+                self.capture_backend, fw, fh
+            )
+            self.perf_ms = 0.0
+            self.perf_n = 0
 
     def paintEvent(self, event):
         painter = QPainter(self)
